@@ -1,0 +1,76 @@
+1.页面异常：
+  启动分页机制后，如果虚拟地址对应的物理地址未在内存中或访问的类型有误，就会发生页错误异常，
+主要原因包括：
+  （1）目标页面不存在（页表项全为0，即未存在映射或映射已取消）
+  （2）相应的物理页面不在内存中（页表项非空，Present标志位=0）
+  （3）访问权限不服务（Present标志为=1，但可能写一个只读页面）
+2.关键数据结构：
+  （1）vma_struct：连续的虚拟内存区
+                   vm_mm：指向一个比vma_struct更高的抽象层次的数据结构
+                   vm_start：vma的开始地址
+                   vm_end：vma的结束地址
+                   vm_flags：虚拟内存空间的属性
+                            VM_READ：只读
+                            VM_WRITE：可读写
+                            VM_EXEC：可执行
+                   list_link：双向链表，按照从小到大的顺序把虚拟空间连接起来
+  （2）mm_struct：
+                mmap_list：双向链表头，链接了所有属于同一页目录表的虚拟内存空间
+                mmap_cache：指向当前正在使用的虚拟内存空间
+                pgdir：指向mm_struct维护的页表
+                map_count：记录mmap_list里面链接的vma_struct的个数
+                sm_priv：指向用来链接记录页访问情况的链表头
+3.错误码errorCode：
+  产生页访问异常后，CPU把地址装入CR2寄存器中，给出出错码errorCode说明页访问异常的类型。
+ucore将errorCode保存在trapframe中tf_err成员变量中。中断例程调用do_pgfault()处理。、
+4.do_pgfault：
+  初始工作：调用find_vam检查传入的addr是否正确
+           -->进行错误类型检查：第一种，申请写操作，物理内存中不存在，并且对应地址的内容不允许写
+                           第二种，申请读操作，并且物理内存中存在，此时报错说明是权限不够
+                           第三种，申请读操作，物理内存中不存在，并且该地址数据不允许被读或者加载
+  Exercise 1：寻找addr对应的页表项，如果不存在，则分配一页（get_pte）
+             -->如果页表项内容为空（*ptep=0），说明不冲突，这时直接配物理页建立映射关系即可
+  Exercise 2：如果页表项内容不为空（*ptep!=0），说明冲突：
+              在内存中分配一个页的物理空间，根据mm和addr确定需求页在磁盘中的物理地址，然后从磁盘中交换（swap_in）
+             -->将新申请的物理页面与线性地址建立映射关系（page_insert）
+             -->根据FIFO，将最近到达的页链接到队列的最后（swap_map_swappablesss）
+5.Exercise 2：抽象类：
+                  /* Global initialization for the swap manager */
+                  int (*init)            (void);
+                  /* Initialize the priv data inside mm_struct */
+                  int (*init_mm)         (struct mm_struct *mm);
+                  /* Called when tick interrupt occured */
+                  int (*tick_event)      (struct mm_struct *mm);
+                  /* Called when map a swappable page into the mm_struct */
+                  int (*map_swappable)   (struct mm_struct *mm, uintptr_t addr, struct Page *page, int swap_in);
+                  /* When a page is marked as shared, this routine is called to
+                    * delete the addr entry from the swap manager */
+                  int (*set_unswappable) (struct mm_struct *mm, uintptr_t addr);
+                  /* Try to swap out a page, return then victim */
+                  int (*swap_out_victim) (struct mm_struct *mm, struct Page **ptr_page, int in_tick);
+                  /* check the page relpacement algorithm */
+                  int (*check_swap)(void);     
+              pra_list_head：FIFO维护的队列
+              _fifo_swap_out_victim：
+                  删除队列头元素（list_entry_t *le = head->prev）
+                  -->返回对应的页（*ptr_page = p）
+6.请描述页目录项（Pag Director Entry）和页表（Page Table Entry）中组成部分对ucore实现页替换算法的潜在用处：
+  当页表项非空时，页表项在P=0时，可以记录虚拟地址与磁盘扇区的对应关系；P=1时，记录虚拟地址与内存地址的对应关系；
+  当页表项为空时，说明还未建立映射关系。
+  页表项的flags，如PTE_A（accessed bit），PTE_D（dirty bit）可用于辅助页替换算法；页目录项可以定位页表项。
+7.如果ucore的缺页服务例程在执行过程中访问内存，出现了页访问异常，请问硬件要做哪些事情？
+  异常线性地址存在CR2寄存器中，把页异常的errorCode保存在中断栈，之后调用trap->trap_dispatch
+  ->pgfault_handler->pg_pgfault
+8.需要被换出的页的特征：
+  accessed bit=0 && dirty bit=0
+9.在ucore中如何判断具有这样特征的页：
+  双向循环链表的指针循环扫描
+10.何时换入和换出：
+  需要调入的页不在页表中，且页表已满。
+11.Clock算法：
+  accessed  dirty   accessed  dirty
+      0       0         relpace
+      1       0         0       0
+      0       1         0       0
+      1       1         0       1
+
